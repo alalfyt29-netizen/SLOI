@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مجسم الصورة - سحابة نقاط 3D</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(20, 20, 20, 0.85);
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            border: 1px solid #333;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            backdrop-filter: blur(5px);
+            z-index: 10;
+        }
+        input[type="file"] { display: none; }
+        .upload-btn {
+            background-color: #0ff;
+            color: #000;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-block;
+            font-weight: bold;
+            transition: 0.3s;
+        }
+        .upload-btn:hover {
+            background-color: #fff;
+            box-shadow: 0 0 15px #0ff;
+        }
+        #loading {
+            display: none;
+            color: #0ff;
+            margin-top: 10px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .controls {
+            margin-top: 15px;
+            font-size: 12px;
+            color: #aaa;
+            text-align: right;
+        }
+        .controls label { display: block; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; accent-color: #0ff; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h2>🌌 مجسم الصورة</h2>
+        <p style="font-size: 12px; color: #ccc;">اختر صورة لتحويلها إلى سحابة نقاط</p>
+        
+        <label for="imageUpload" class="upload-btn">📂 اختر صورة</label>
+        <input type="file" id="imageUpload" accept="image/*">
+        
+        <div id="loading">⏳ جاري معالجة البكسلات...</div>
+
+        <div class="controls">
+            <label>حجم النقاط: <input type="range" id="pointSize" min="0.005" max="0.05" step="0.005" value="0.015"></label>
+            <label>قوة العمق (Z): <input type="range" id="depthScale" min="0" max="5" step="0.1" value="2.0"></label>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <!-- استيراد مكتبة Three.js عبر CDN -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // 1. إعداد المشهد والكاميرا
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050505);
+        // إضافة تأثير ضباب للعمق
+        scene.fog = new THREE.FogExp2(0x050505, 0.05);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 6);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio); // دقة عالية
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        container.appendChild(renderer.domElement);
+
+        // 2. التحكم بالماوس
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 1.0;
+
+        // 3. الإضاءة (لأن النقاط قد تحتاج إضاءة خفيفة)
+        const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
+        scene.add(ambientLight);
+
+        // 4. المتغيرات
+        let pointCloud = null;
+        let originalPositions = []; // لحفظ الإحداثيات الأصلية عند تغيير العمق
+
+        // 5. دوال التحكم
+        const pointSizeSlider = document.getElementById('pointSize');
+        const depthScaleSlider = document.getElementById('depthScale');
+
+        pointSizeSlider.addEventListener('input', (e) => {
+            if (pointCloud) pointCloud.material.size = parseFloat(e.target.value);
+        });
+
+        depthScaleSlider.addEventListener('input', (e) => {
+            if (!pointCloud) return;
+            const scale = parseFloat(e.target.value);
+            const positions = pointCloud.geometry.attributes.position.array;
+            
+            // تحديث الإحداثي Z بناءً على القيمة الجديدة
+            for (let i = 0; i < positions.length; i += 3) {
+                // originalPositions[i+2] يحتفظ بقيمة السطوع الأصلية (بين 0 و 1)
+                positions[i + 2] = originalPositions[i + 2] * scale;
+            }
+            pointCloud.geometry.attributes.position.needsUpdate = true;
+        });
+
+        // 6. دالة معالجة الصورة (بدون تصغير)
+        function createPointCloud(imageFile) {
+            document.getElementById('loading').style.display = 'block';
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    if (pointCloud) scene.remove(pointCloud);
+
+                    // رسم الصورة بالدقة الكاملة على Canvas
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    
+                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const data = imageData.data;
+
+                    const geometry = new THREE.BufferGeometry();
+                    const positions = [];
+                    const colors = [];
+                    originalPositions = [];
+
+                    const width = canvas.width;
+                    const height = canvas.height;
+                    // ضبط الحجم ليتناسب مع الشاشة
+                    const scaleFactor = 5 / Math.max(width, height); 
+                    const depthFactor = parseFloat(depthScaleSlider.value);
+
+                    // المرور على كل بكسل (دقة كاملة)
+                    for (let y = 0; y < height; y++) {
+                        for (let x = 0; x < width; x++) {
+                            const index = (y * width + x) * 4;
+                            
+                            const r = data[index];
+                            const g = data[index + 1];
+                            const b = data[index + 2];
+                            const a = data[index + 3];
+
+                            // تجاهل البكسلات الشفافة (إذا كانت الصورة PNG)
+                            if (a < 128) continue;
+
+                            // حساب السطوع
+                            const brightness = (r + g + b) / 3 / 255;
+
+                            const posX = (x - width / 2) * scaleFactor;
+                            const posY = -(y - height / 2) * scaleFactor;
+                            const posZ = brightness * depthFactor;
+
+                            positions.push(posX, posY, posZ);
+                            originalPositions.push(posX, posY, brightness); // نحفظ السطوع بدلاً من Z
+
+                            colors.push(r / 255, g / 255, b / 255);
+                        }
+                    }
+
+                    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+                    const material = new THREE.PointsMaterial({
+                        size: parseFloat(pointSizeSlider.value),
+                        vertexColors: true,
+                        transparent: true,
+                        opacity: 0.85,
+                        sizeAttenuation: true // النقاط تصغر مع البعد
+                    });
+
+                    pointCloud = new THREE.Points(geometry, material);
+                    scene.add(pointCloud);
+                    
+                    document.getElementById('loading').style.display = 'none';
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(imageFile);
+        }
+
+        // 7. ربط زر الرفع
+        document.getElementById('imageUpload').addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                createPointCloud(e.target.files[0]);
+            }
+        });
+
+        // 8. حلقة العرض
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // 9. تكييف الشاشة
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
